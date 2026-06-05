@@ -162,6 +162,7 @@ export type {
 export type { Project, ProjectCodebase, ProjectCodebaseOrigin, ProjectGoalRef, ProjectManagedByPlugin, ProjectWorkspace } from "./project.js";
 export type {
   CompanySearchHighlight,
+  CompanySearchArtifactSummary,
   CompanySearchIssueSummary,
   CompanySearchResponse,
   CompanySearchResult,
@@ -213,6 +214,15 @@ export type {
   IssueWorkProductReviewState,
   AttachmentArtifactWorkProductMetadata,
 } from "./work-product.js";
+export type {
+  CompanyArtifact,
+  CompanyArtifactAgentSummary,
+  CompanyArtifactIssueSummary,
+  CompanyArtifactMediaKind,
+  CompanyArtifactProjectSummary,
+  CompanyArtifactSource,
+  CompanyArtifactsResponse,
+} from "./artifact.js";
 export type {
   Issue,
   IssueWorkMode,

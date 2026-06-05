@@ -6,6 +6,7 @@ import { and, desc, eq, inArray, notInArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
+  agents,
   documents,
   executionWorkspaces,
   heartbeatRuns,
@@ -1926,6 +1927,55 @@ export function issueRoutes(
     return false;
   }
 
+  async function loadWorkProductRunAttribution(runId: string) {
+    return await db
+      .select({
+        id: heartbeatRuns.id,
+        companyId: heartbeatRuns.companyId,
+        agentId: heartbeatRuns.agentId,
+        agentCompanyId: agents.companyId,
+      })
+      .from(heartbeatRuns)
+      .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
+      .where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function resolveWorkProductCreatedByRunId(
+    req: Request,
+    res: Response,
+    companyId: string,
+    input: { createdByRunId?: string | null },
+    mode: "create" | "update",
+  ): Promise<string | null | undefined> {
+    const hasCreatedByRunId = Object.prototype.hasOwnProperty.call(input, "createdByRunId");
+    if (mode === "update" && !hasCreatedByRunId) return undefined;
+
+    const requestedRunId = input.createdByRunId ?? null;
+    if (req.actor.type === "agent") {
+      const actorRunId = req.actor.runId?.trim() || null;
+      if (requestedRunId && requestedRunId !== actorRunId) {
+        res.status(403).json({ error: "createdByRunId must match the authenticated agent run" });
+        return undefined;
+      }
+      if (!actorRunId) return requestedRunId;
+      const run = await loadWorkProductRunAttribution(actorRunId);
+      if (!run || run.companyId !== companyId || run.agentCompanyId !== companyId || run.agentId !== req.actor.agentId) {
+        res.status(403).json({ error: "createdByRunId is not valid for this work product actor" });
+        return undefined;
+      }
+      return actorRunId;
+    }
+
+    if (!requestedRunId) return null;
+    const run = await loadWorkProductRunAttribution(requestedRunId);
+    if (!run || run.companyId !== companyId || run.agentCompanyId !== companyId) {
+      res.status(403).json({ error: "createdByRunId is not valid for this company" });
+      return undefined;
+    }
+    return requestedRunId;
+  }
+
   function assertStructuredCommentFieldsAllowed(
     req: Request,
     res: Response,
@@ -3669,6 +3719,9 @@ export function issueRoutes(
       projectId: req.body.projectId ?? issue.projectId ?? null,
       sourceTrust: await sourceTrustForActorWrite(issue, actor),
     };
+    const createdByRunId = await resolveWorkProductCreatedByRunId(req, res, issue.companyId, req.body, "create");
+    if (createdByRunId === undefined) return;
+    createInput.createdByRunId = createdByRunId;
     if (requiresPaperclipAttachmentMetadata(createInput)) {
       createInput.metadata = await canonicalizePaperclipArtifactMetadata({
         issue,
@@ -3862,6 +3915,9 @@ export function issueRoutes(
     if (!(await assertDeliverableMutationAllowedByRunContext(req, res, issue))) return;
     const actor = getActorInfo(req);
     const patch = { ...req.body };
+    const createdByRunId = await resolveWorkProductCreatedByRunId(req, res, existing.companyId, req.body, "update");
+    if (createdByRunId === undefined && Object.prototype.hasOwnProperty.call(req.body, "createdByRunId")) return;
+    if (createdByRunId !== undefined) patch.createdByRunId = createdByRunId;
     if (requiresPaperclipAttachmentMetadata(patch, existing)) {
       if (patch.metadata !== undefined) {
         patch.metadata = await canonicalizePaperclipArtifactMetadata({

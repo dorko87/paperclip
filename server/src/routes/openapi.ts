@@ -35,6 +35,8 @@ import {
   createCompanySchema,
   updateCompanySchema,
   updateCompanyBrandingSchema,
+  companyArtifactsQuerySchema,
+  companyArtifactsResponseSchema,
   // Routine
   createRoutineSchema,
   updateRoutineSchema,
@@ -787,6 +789,28 @@ registry.registerPath({
   summary: "Get a company",
   request: { params: z.object({ companyId: z.string() }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/artifacts",
+  tags: ["companies"],
+  summary: "List company artifacts",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    query: companyArtifactsQuerySchema,
+  },
+  responses: {
+    200: {
+      description: "Company artifact projection",
+      content: {
+        "application/json": {
+          schema: companyArtifactsResponseSchema,
+        },
+      },
+    },
+    401: r.unauthorized,
+  },
 });
 
 registry.registerPath({

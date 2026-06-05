@@ -2872,6 +2872,37 @@ export function IssueDetail() {
     setHandoffFocusSignal((current) => current + 1);
   }, [location.hash]);
 
+  // Scroll + briefly highlight work-product / direct-attachment anchors so the
+  // company Artifacts page (PAP-10359) can deep-link to a specific artifact in
+  // its issue context. Retries while the section data loads in.
+  useEffect(() => {
+    const match = location.hash.match(/^#(work-product|attachment)-(.+)$/);
+    if (!match) return;
+    const targetId = `${match[1]}-${decodeURIComponent(match[2]!)}`;
+    let cancelled = false;
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tryScroll = () => {
+      if (cancelled) return;
+      const element = document.getElementById(targetId);
+      if (!element) {
+        if (attempts < 30) {
+          attempts += 1;
+          timer = setTimeout(tryScroll, 100);
+        }
+        return;
+      }
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+      element.classList.add("ring-2", "ring-primary/50", "transition-shadow");
+      timer = setTimeout(() => element.classList.remove("ring-2", "ring-primary/50", "transition-shadow"), 3000);
+    };
+    tryScroll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [location.hash, workProducts, attachments]);
+
   useEffect(() => {
     if (pendingCommentComposerFocusKey === 0) return;
     if (detailTab !== "chat") return;

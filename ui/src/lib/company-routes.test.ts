@@ -64,4 +64,22 @@ describe("company routes", () => {
       "/teams-catalog/core-exec-team",
     );
   });
+
+  it("treats /artifacts as a board route that needs a company prefix", () => {
+    expect(isBoardPathWithoutPrefix("/artifacts")).toBe(true);
+    expect(extractCompanyPrefixFromPath("/artifacts")).toBeNull();
+    expect(applyCompanyPrefix("/artifacts", "PAP")).toBe("/PAP/artifacts");
+    expect(toCompanyRelativePath("/PAP/artifacts")).toBe("/artifacts");
+  });
+
+  it("preserves artifact deep-link anchors when applying the company prefix", () => {
+    expect(applyCompanyPrefix("/issues/PAP-10205#work-product-wp-1", "PAP")).toBe(
+      "/PAP/issues/PAP-10205#work-product-wp-1",
+    );
+    expect(applyCompanyPrefix("/issues/PAP-10306#attachment-att-1", "PAP")).toBe(
+      "/PAP/issues/PAP-10306#attachment-att-1",
+    );
+    // Already-prefixed paths are returned untouched.
+    expect(applyCompanyPrefix("/PAP/artifacts", "PAP")).toBe("/PAP/artifacts");
+  });
 });

@@ -13,7 +13,7 @@ function createSearchResponse(query: CompanySearchQuery): CompanySearchResponse 
     limit: query.limit,
     offset: query.offset,
     results: [],
-    countsByType: { issue: 0, agent: 0, project: 0 },
+    countsByType: { issue: 0, artifact: 0, agent: 0, project: 0 },
     hasMore: false,
   };
 }

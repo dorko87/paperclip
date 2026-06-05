@@ -327,6 +327,18 @@ export {
 } from "./work-product.js";
 
 export {
+  COMPANY_ARTIFACTS_DEFAULT_LIMIT,
+  COMPANY_ARTIFACTS_MAX_LIMIT,
+  COMPANY_ARTIFACTS_MAX_QUERY_LENGTH,
+  companyArtifactMediaKindSchema,
+  companyArtifactSchema,
+  companyArtifactSourceSchema,
+  companyArtifactsQuerySchema,
+  companyArtifactsResponseSchema,
+  type CompanyArtifactsQuery,
+} from "./artifact.js";
+
+export {
   executionWorkspaceConfigSchema,
   updateExecutionWorkspaceSchema,
   executionWorkspaceStatusSchema,
