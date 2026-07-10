@@ -1718,6 +1718,7 @@ export {
   awsSecretsManagerProviderConfigSchema,
   gcpSecretManagerProviderConfigSchema,
   vaultProviderConfigSchema,
+  infisicalProviderConfigSchema,
   secretProviderConfigPayloadSchema,
   createSecretBindingSchema,
   rotateSecretSchema,

@@ -166,6 +166,9 @@ type ProviderVaultForm = {
   address: string;
   mountPath: string;
   secretPathPrefix: string;
+  siteUrl: string;
+  environment: string;
+  secretPath: string;
 };
 
 type SafeProviderErrorDetails = {
@@ -192,10 +195,13 @@ const PROVIDER_ORDER: SecretProvider[] = [
   "aws_secrets_manager",
   "gcp_secret_manager",
   "vault",
+  "infisical",
 ];
 
 function defaultProviderVaultStatus(provider: SecretProvider): SecretProviderConfigStatus {
-  return provider === "gcp_secret_manager" || provider === "vault" ? "coming_soon" : "ready";
+  return provider === "gcp_secret_manager" || provider === "vault" || provider === "infisical"
+    ? "coming_soon"
+    : "ready";
 }
 
 function emptyProviderVaultForm(provider: SecretProvider = "local_encrypted"): ProviderVaultForm {
@@ -216,6 +222,9 @@ function emptyProviderVaultForm(provider: SecretProvider = "local_encrypted"): P
     address: "",
     mountPath: "",
     secretPathPrefix: "",
+    siteUrl: "",
+    environment: "",
+    secretPath: "",
   };
 }
 
@@ -602,6 +611,13 @@ function buildProviderVaultConfig(form: ProviderVaultForm): Record<string, unkno
         namespace: compact(form.namespace),
         mountPath: compact(form.mountPath),
         secretPathPrefix: compact(form.secretPathPrefix),
+      };
+    case "infisical":
+      return {
+        siteUrl: compact(form.siteUrl),
+        projectId: compact(form.projectId),
+        environment: compact(form.environment),
+        secretPath: compact(form.secretPath),
       };
     default:
       return {};
@@ -2882,10 +2898,10 @@ export function Secrets() {
                     }));
                   }}
                 >
-                  <option value="ready" disabled={vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault"}>
+                  <option value="ready" disabled={vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault" || vaultForm.provider === "infisical"}>
                     Ready
                   </option>
-                  <option value="warning" disabled={vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault"}>
+                  <option value="warning" disabled={vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault" || vaultForm.provider === "infisical"}>
                     Warning
                   </option>
                   <option value="coming_soon">Coming soon</option>
@@ -2923,7 +2939,7 @@ export function Secrets() {
               />
             ) : null}
 
-            {vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault" ? (
+            {vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault" || vaultForm.provider === "infisical" ? (
               <div className="rounded-md border border-sky-500/30 bg-sky-500/5 p-3 text-xs text-sky-700 dark:text-sky-300">
                 This provider can save draft routing metadata, but runtime writes and resolution stay disabled until
                 the provider module is implemented and reviewed.
@@ -3311,6 +3327,8 @@ function providerFamilyIcon(provider: SecretProvider) {
       return ShieldCheck;
     case "vault":
       return KeyRound;
+    case "infisical":
+      return Lock;
     default:
       return KeyRound;
   }
@@ -3670,6 +3688,17 @@ function ProviderVaultFields({
         <TextField label="Location" value={form.location} onChange={(value) => setField("location", value)} placeholder="global" />
         <TextField label="Namespace" value={form.namespace} onChange={(value) => setField("namespace", value)} placeholder="production" />
         <TextField label="Secret name prefix" value={form.secretNamePrefix} onChange={(value) => setField("secretNamePrefix", value)} placeholder="paperclip" />
+      </div>
+    );
+  }
+
+  if (form.provider === "infisical") {
+    return (
+      <div className="grid gap-3 sm:grid-cols-2">
+        <TextField label="Site URL" value={form.siteUrl} onChange={(value) => setField("siteUrl", value)} placeholder="https://infisical.example.com" />
+        <TextField label="Project id" value={form.projectId} onChange={(value) => setField("projectId", value)} placeholder="homelab-stacks" />
+        <TextField label="Environment" value={form.environment} onChange={(value) => setField("environment", value)} placeholder="prod" />
+        <TextField label="Secret path" value={form.secretPath} onChange={(value) => setField("secretPath", value)} placeholder="/" />
       </div>
     );
   }
