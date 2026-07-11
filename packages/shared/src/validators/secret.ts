@@ -303,11 +303,73 @@ export const vaultProviderConfigSchema = z.object({
   secretPathPrefix: optionalSafeShortText,
 }).strict();
 
+// Origin-only HTTP(S) URL for the Infisical instance. Mirrors the Vault address
+// rules: no embedded credentials, path, query, or fragment. This narrows the
+// SSRF surface for the per-vault site URL; server-side pinning of the allowed
+// site URL is tracked for Phase 2 (KON-2697 SEC-1).
+const infisicalSiteUrlSchema = z.preprocess(
+  (value) => (typeof value === "string" ? value.trim() : value),
+  z.string().url().superRefine((value, ctx) => {
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      return;
+    }
+    const hasPath = url.pathname !== "" && url.pathname !== "/";
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      hasPath
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Infisical site URL must be an origin-only HTTP(S) URL without credentials, path, query, or fragment",
+      });
+    }
+  }).transform((value) => new URL(value).origin),
+);
+
+// Infisical project slug/id, environment slug, and secret path are non-secret
+// routing metadata. Universal-Auth credentials (client id/secret) are bootstrapped
+// from the server environment and are intentionally NOT part of this config; the
+// shared credential blocklist (rejectSensitiveProviderConfigKeys) plus .strict()
+// keep credential-shaped keys out of persisted vault config.
+const infisicalProjectIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(160)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, "Invalid Infisical project id/slug");
+const infisicalEnvironmentSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(160)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, "Invalid Infisical environment slug");
+const infisicalSecretPathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(512)
+  .regex(/^\/(?:[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*)?$/, "Infisical secret path must be an absolute path like /");
+
+export const infisicalProviderConfigSchema = z.object({
+  siteUrl: infisicalSiteUrlSchema.optional().nullable(),
+  projectId: infisicalProjectIdSchema.optional().nullable(),
+  environment: infisicalEnvironmentSchema.optional().nullable(),
+  secretPath: infisicalSecretPathSchema.optional().nullable(),
+}).strict();
+
 export const secretProviderConfigPayloadSchema = z.discriminatedUnion("provider", [
   z.object({ provider: z.literal("local_encrypted"), config: localEncryptedProviderConfigSchema }),
   z.object({ provider: z.literal("aws_secrets_manager"), config: awsSecretsManagerProviderConfigSchema }),
   z.object({ provider: z.literal("gcp_secret_manager"), config: gcpSecretManagerProviderConfigSchema }),
   z.object({ provider: z.literal("vault"), config: vaultProviderConfigSchema }),
+  z.object({ provider: z.literal("infisical"), config: infisicalProviderConfigSchema }),
 ]);
 
 export const createSecretProviderConfigSchema = z.object({
@@ -330,8 +392,8 @@ export const createSecretProviderConfigSchema = z.object({
       });
     }
   }
-  const status = value.status ?? (["gcp_secret_manager", "vault"].includes(value.provider) ? "coming_soon" : "ready");
-  if ((value.provider === "gcp_secret_manager" || value.provider === "vault") && status !== "coming_soon" && status !== "disabled") {
+  const status = value.status ?? (["gcp_secret_manager", "vault", "infisical"].includes(value.provider) ? "coming_soon" : "ready");
+  if ((value.provider === "gcp_secret_manager" || value.provider === "vault" || value.provider === "infisical") && status !== "coming_soon" && status !== "disabled") {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["status"],
