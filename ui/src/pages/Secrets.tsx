@@ -160,8 +160,8 @@ const PROVIDER_ORDER: SecretProvider[] = [
   "infisical",
 ];
 
-function defaultProviderVaultStatus(provider: SecretProvider): SecretProviderConfigStatus {
-  return provider === "gcp_secret_manager" || provider === "vault" || provider === "infisical"
+export function defaultProviderVaultStatus(provider: SecretProvider): SecretProviderConfigStatus {
+  return provider === "gcp_secret_manager" || provider === "vault"
     ? "coming_soon"
     : "ready";
 }
@@ -2408,10 +2408,10 @@ export function Secrets() {
                     }));
                   }}
                 >
-                  <option value="ready" disabled={vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault" || vaultForm.provider === "infisical"}>
+                  <option value="ready" disabled={vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault"}>
                     Ready
                   </option>
-                  <option value="warning" disabled={vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault" || vaultForm.provider === "infisical"}>
+                  <option value="warning" disabled={vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault"}>
                     Warning
                   </option>
                   <option value="coming_soon">Coming soon</option>
@@ -2449,7 +2449,7 @@ export function Secrets() {
               />
             ) : null}
 
-            {vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault" || vaultForm.provider === "infisical" ? (
+            {vaultForm.provider === "gcp_secret_manager" || vaultForm.provider === "vault" ? (
               <div className="rounded-md border border-sky-500/30 bg-sky-500/5 p-3 text-xs text-sky-700 dark:text-sky-300">
                 This provider can save draft routing metadata, but runtime writes and resolution stay disabled until
                 the provider module is implemented and reviewed.

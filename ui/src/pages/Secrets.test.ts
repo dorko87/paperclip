@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import type { CompanySecretProviderConfig, SecretProviderDescriptor } from "@paperclipai/shared";
 import {
+  defaultProviderVaultStatus,
   findCreateProviderReplacement,
   getAwsManagedPathPreview,
   getCreateProviderBlockReason,
@@ -194,6 +195,18 @@ describe("Secrets page provider helpers", () => {
         "aws_secrets_manager",
       ),
     ).toBe("prod");
+  });
+
+  it("defaults infisical vaults to ready (provider is implemented), keeping gcp/vault coming soon", () => {
+    // Regression: infisical was hardcoded to coming_soon in the UI, which forced newly
+    // created infisical vaults to save as draft metadata only and greyed out the form,
+    // even though the backend implements the provider. Must match the backend
+    // COMING_SOON_SECRET_PROVIDERS set (gcp_secret_manager, vault). See KON-2807.
+    expect(defaultProviderVaultStatus("infisical")).toBe("ready");
+    expect(defaultProviderVaultStatus("local_encrypted")).toBe("ready");
+    expect(defaultProviderVaultStatus("aws_secrets_manager")).toBe("ready");
+    expect(defaultProviderVaultStatus("gcp_secret_manager")).toBe("coming_soon");
+    expect(defaultProviderVaultStatus("vault")).toBe("coming_soon");
   });
 
   it("explains why coming-soon provider vaults cannot be selected", () => {
