@@ -350,12 +350,20 @@ const infisicalEnvironmentSchema = z
   .min(1)
   .max(160)
   .regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/, "Invalid Infisical environment slug");
+// SEC-4 (KON-2810): the per-segment negative lookaheads reject bare `.` and `..`
+// segments (e.g. `/paperclip/../otherco`), foreclosing a `..` traversal boundary
+// bypass under any future multi-company model that separates tenants by
+// `secretPath` prefix. Kept in sync with `INFISICAL_SECRET_PATH_RE` in
+// server/src/secrets/infisical-provider.ts.
 const infisicalSecretPathSchema = z
   .string()
   .trim()
   .min(1)
   .max(512)
-  .regex(/^\/(?:[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*)?$/, "Infisical secret path must be an absolute path like /");
+  .regex(
+    /^\/(?:(?!\.\.?(?:\/|$))[A-Za-z0-9._-]+(?:\/(?!\.\.?(?:\/|$))[A-Za-z0-9._-]+)*)?$/,
+    "Infisical secret path must be an absolute path like / (bare '.'/'..' segments are not allowed)",
+  );
 
 export const infisicalProviderConfigSchema = z.object({
   siteUrl: infisicalSiteUrlSchema.optional().nullable(),
