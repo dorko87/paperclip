@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { DeploymentMode } from "@paperclipai/shared";
 import { unprocessable } from "../errors.js";
 import type {
@@ -7,31 +8,46 @@ import type {
   SecretProviderModule,
   SecretProviderValidationResult,
   SecretProviderVaultRuntimeConfig,
+  StoredSecretVersionMaterial,
 } from "./types.js";
 import { SecretProviderClientError } from "./types.js";
 
 /**
  * Infisical secret provider (Universal-Auth).
  *
- * Phase 1a scope (KON-2693): descriptor, validateConfig, and a real healthCheck
- * (Universal-Auth login + authenticated list ping). Managed writes and runtime
- * resolution are intentionally stubbed for Phase 2 and the provider is gated
- * `coming_soon` at the service layer, so none of the stubbed operations are
- * reachable at runtime.
+ * Phase 1b scope (KON-2806): the provider is a usable *reference* provider.
+ * Users link an existing Infisical secret by reference and Paperclip resolves
+ * the value at runtime through the standard resolver (version rows, bindings,
+ * per-company ownership asserts, and the audit log all sit in front of this).
+ * Paperclip never writes into Infisical, so managed create/version/rotate are
+ * unsupported and `supportsManagedValues` stays `false`.
+ *
+ * Live operations: descriptor, validateConfig, healthCheck (Universal-Auth
+ * login + authenticated list ping), linkExternalSecret (validate the referenced
+ * secret exists, store the reference — never the value), and resolveVersion
+ * (read the value via the v3 raw route and return it to the resolver).
  *
  * Security invariants:
  *  - Universal-Auth credentials are bootstrapped ONLY from the server process
  *    environment (INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET). They are never
  *    read from, or persisted into, the vault config (the shared credential
  *    blocklist plus a `.strict()` config schema enforce this).
- *  - The list ping returns only a secret COUNT. Secret values and the access
- *    token never leave the gateway boundary and are never placed in health
- *    details, warnings, or logs.
+ *  - SEC-1 (KON-2697): the Infisical origin is PINNED server-side to the
+ *    `INFISICAL_SITE_URL` env var. Per-company vault config MUST NOT override
+ *    the origin — every authenticated request (login, list, read) goes to the
+ *    pinned origin only, so a hostile per-company `siteUrl` can never be used to
+ *    exfiltrate the global machine-identity credentials via SSRF.
+ *  - The list ping returns only a secret COUNT and resolved values are returned
+ *    straight to the resolver; secret material and the access token never enter
+ *    health details, warnings, logs, or link-time metadata.
  */
 
 const INFISICAL_PROVIDER_ID = "infisical" as const;
+const INFISICAL_REF_SCHEME = "infisical" as const;
 const INFISICAL_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_SECRET_PATH = "/";
+const INFISICAL_SECRET_KEY_RE = /^[A-Za-z0-9_.-]+$/;
+const INFISICAL_SECRET_PATH_RE = /^\/(?:[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*)?$/;
 const INFISICAL_RUNTIME_CREDENTIAL_WARNING =
   "Infisical Universal-Auth machine identity credentials (INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET) must be provided to the Paperclip server runtime through the process environment; they are never stored in company_secrets or provider vault config.";
 
@@ -58,6 +74,21 @@ interface InfisicalListResult {
   count: number;
 }
 
+/** Parsed Infisical reference: a single secret within the vault's project/env. */
+interface InfisicalSecretRef {
+  secretPath: string;
+  secretKey: string;
+}
+
+interface InfisicalReadInput {
+  siteUrl: string;
+  accessToken: string;
+  projectId: string;
+  environment: string;
+  secretPath: string;
+  secretKey: string;
+}
+
 interface InfisicalGateway {
   login(input: {
     siteUrl: string;
@@ -71,6 +102,9 @@ interface InfisicalGateway {
     environment: string;
     secretPath: string;
   }): Promise<InfisicalListResult>;
+  /** Read a single secret value via the v3 raw route. The value is returned to
+   *  the resolver and MUST NOT be logged or placed in metadata. */
+  readSecret(input: InfisicalReadInput): Promise<string>;
 }
 
 function asOptionalNonEmptyString(value: unknown): string | null {
@@ -93,6 +127,145 @@ function normalizeSiteUrl(value: string | null): string | null {
 
 function joinUrl(siteUrl: string, path: string): string {
   return `${siteUrl.replace(/\/+$/, "")}${path}`;
+}
+
+function sha256Hex(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+/**
+ * SEC-1 (KON-2697): the Infisical origin is pinned to the server env var
+ * `INFISICAL_SITE_URL`. Per-company vault config never contributes the origin
+ * used for authenticated requests, so a hostile per-company `siteUrl` cannot be
+ * used to exfiltrate the global machine-identity credentials via SSRF.
+ */
+function pinnedSiteUrl(): string | null {
+  return normalizeSiteUrl(asOptionalNonEmptyString(process.env.INFISICAL_SITE_URL));
+}
+
+function normalizeSecretPath(value: string | null | undefined): string {
+  const trimmed = asOptionalNonEmptyString(value);
+  if (!trimmed) return DEFAULT_SECRET_PATH;
+  const withLeadingSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  // Collapse any trailing slash except for the root path.
+  const normalized = withLeadingSlash.length > 1
+    ? withLeadingSlash.replace(/\/+$/, "")
+    : withLeadingSlash;
+  return normalized.length > 0 ? normalized : DEFAULT_SECRET_PATH;
+}
+
+/**
+ * Parse the user-supplied external reference into an Infisical (path, key) pair.
+ * Accepted forms (project + environment always come from the per-company vault
+ * config, never the reference):
+ *   - `infisical://<secretPath>#<secretKey>`  (canonical, round-trips from link)
+ *   - `<secretPath>#<secretKey>`
+ *   - `<secretKey>`  (path defaults to the vault config `secretPath`)
+ */
+function parseInfisicalRef(
+  externalRef: string | null | undefined,
+  defaultPath: string,
+): InfisicalSecretRef {
+  const raw = asOptionalNonEmptyString(externalRef);
+  if (!raw) {
+    throw new SecretProviderClientError({
+      code: "invalid_request",
+      provider: INFISICAL_PROVIDER_ID,
+      operation: "parseRef",
+      message: "An Infisical secret reference (secret key, or <path>#<key>) is required.",
+      rawMessage: "Infisical external reference is empty",
+    });
+  }
+  let body = raw;
+  if (body.startsWith(`${INFISICAL_REF_SCHEME}://`)) {
+    body = body.slice(`${INFISICAL_REF_SCHEME}://`.length);
+  }
+  const hashIndex = body.lastIndexOf("#");
+  let secretPath: string;
+  let secretKey: string;
+  if (hashIndex >= 0) {
+    secretPath = normalizeSecretPath(body.slice(0, hashIndex));
+    secretKey = body.slice(hashIndex + 1).trim();
+  } else {
+    secretPath = normalizeSecretPath(defaultPath);
+    secretKey = body.trim();
+  }
+  if (!secretKey || !INFISICAL_SECRET_KEY_RE.test(secretKey)) {
+    throw new SecretProviderClientError({
+      code: "invalid_request",
+      provider: INFISICAL_PROVIDER_ID,
+      operation: "parseRef",
+      message: "The Infisical secret key is missing or contains unsupported characters.",
+      rawMessage: "Infisical secret key failed validation",
+    });
+  }
+  if (!INFISICAL_SECRET_PATH_RE.test(secretPath)) {
+    throw new SecretProviderClientError({
+      code: "invalid_request",
+      provider: INFISICAL_PROVIDER_ID,
+      operation: "parseRef",
+      message: "The Infisical secret path must be an absolute path like /.",
+      rawMessage: "Infisical secret path failed validation",
+    });
+  }
+  return { secretPath, secretKey };
+}
+
+/** Canonical, storable external reference string for a parsed secret ref. */
+function formatInfisicalRef(ref: InfisicalSecretRef): string {
+  return `${INFISICAL_REF_SCHEME}://${ref.secretPath}#${ref.secretKey}`;
+}
+
+interface InfisicalStoredMaterial extends StoredSecretVersionMaterial {
+  scheme: typeof INFISICAL_REF_SCHEME;
+  source: "external_reference";
+  secretPath: string;
+  secretKey: string;
+  projectId: string | null;
+  environment: string | null;
+}
+
+function asInfisicalMaterial(material: StoredSecretVersionMaterial | null | undefined): {
+  secretPath: string | null;
+  secretKey: string | null;
+} {
+  if (!material || typeof material !== "object") return { secretPath: null, secretKey: null };
+  const record = material as Record<string, unknown>;
+  return {
+    secretPath: asOptionalNonEmptyString(record.secretPath),
+    secretKey: asOptionalNonEmptyString(record.secretKey),
+  };
+}
+
+/**
+ * Build the persisted version material for a linked external reference. Only the
+ * reference coordinates are stored; the secret value is NEVER persisted (fetched
+ * fresh at resolve time). `valueSha256` is a fingerprint of the reference, not
+ * of the value.
+ */
+function buildExternalReferenceMaterial(
+  config: InfisicalResolvedConfig,
+  ref: InfisicalSecretRef,
+): PreparedSecretVersion {
+  const externalRef = formatInfisicalRef(ref);
+  const fingerprint = sha256Hex(
+    `${INFISICAL_REF_SCHEME}:${config.projectId ?? ""}:${config.environment ?? ""}:${ref.secretPath}:${ref.secretKey}`,
+  );
+  const material: InfisicalStoredMaterial = {
+    scheme: INFISICAL_REF_SCHEME,
+    source: "external_reference",
+    secretPath: ref.secretPath,
+    secretKey: ref.secretKey,
+    projectId: config.projectId,
+    environment: config.environment,
+  };
+  return {
+    material,
+    valueSha256: fingerprint,
+    fingerprintSha256: fingerprint,
+    externalRef,
+    providerVersionRef: null,
+  };
 }
 
 function readInfisicalCredentials(): InfisicalCredentials | null {
@@ -126,13 +299,23 @@ function readProviderVaultConfig(
   // (handled at the service layer and by the Phase-2 stubs below), not the
   // read-only connectivity probe used to validate a saved vault config.
   return {
-    siteUrl:
-      normalizeSiteUrl(asOptionalNonEmptyString(input.config.siteUrl)) ??
-      normalizeSiteUrl(asOptionalNonEmptyString(process.env.INFISICAL_SITE_URL)),
+    // SEC-1: origin is pinned to INFISICAL_SITE_URL server-side. A per-company
+    // `siteUrl` in the vault config is intentionally IGNORED for the origin so a
+    // hostile value can never redirect authenticated (credential-bearing)
+    // requests. Mismatches are surfaced as a validation warning, not honored.
+    siteUrl: pinnedSiteUrl(),
     projectId: asOptionalNonEmptyString(input.config.projectId),
     environment: asOptionalNonEmptyString(input.config.environment),
-    secretPath: asOptionalNonEmptyString(input.config.secretPath) ?? DEFAULT_SECRET_PATH,
+    secretPath: normalizeSecretPath(asOptionalNonEmptyString(input.config.secretPath)),
   };
+}
+
+/** True when the vault config carries a `siteUrl` whose origin differs from the
+ *  server-pinned origin (SEC-1). Used only to surface a validation warning. */
+function vaultSiteUrlOverrideIgnored(input: SecretProviderVaultRuntimeConfig): boolean {
+  const configured = normalizeSiteUrl(asOptionalNonEmptyString(input.config.siteUrl));
+  if (!configured) return false;
+  return configured !== pinnedSiteUrl();
 }
 
 function canLoadInfisicalConfig(): boolean {
@@ -275,6 +458,43 @@ class InfisicalHttpGateway implements InfisicalGateway {
     const secrets = Array.isArray(body.secrets) ? body.secrets : [];
     return { count: secrets.length };
   }
+
+  async readSecret(input: InfisicalReadInput): Promise<string> {
+    // v3 raw single-secret route: GET /api/v3/secrets/raw/{secretKey}
+    //   ?workspaceId=<projectId>&environment=<slug>&secretPath=<path>
+    const url = new URL(
+      joinUrl(input.siteUrl, `/api/v3/secrets/raw/${encodeURIComponent(input.secretKey)}`),
+    );
+    url.searchParams.set("workspaceId", input.projectId);
+    url.searchParams.set("environment", input.environment);
+    url.searchParams.set("secretPath", input.secretPath);
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${input.accessToken}`,
+        accept: "application/json",
+      },
+      signal: AbortSignal.timeout(INFISICAL_REQUEST_TIMEOUT_MS),
+    });
+    const body = await this.readJson(response);
+    if (!response.ok) this.throwFromResponse("readSecret", response, body);
+    const secret =
+      body.secret && typeof body.secret === "object"
+        ? (body.secret as Record<string, unknown>)
+        : null;
+    const secretValue = secret ? secret.secretValue : undefined;
+    if (typeof secretValue !== "string") {
+      throw new SecretProviderClientError({
+        code: "not_found",
+        provider: INFISICAL_PROVIDER_ID,
+        operation: "readSecret",
+        message: infisicalSafeMessage("not_found"),
+        rawMessage: "Infisical read response did not include a string secret value",
+      });
+    }
+    // The value is returned straight to the resolver; never logged here.
+    return secretValue;
+  }
 }
 
 export function createInfisicalProvider(options?: {
@@ -295,10 +515,59 @@ export function createInfisicalProvider(options?: {
     return options?.credentials ? options.credentials() : readInfisicalCredentials();
   }
 
-  function comingSoon(operation: string): never {
+  function managedUnsupported(operation: string): never {
     throw unprocessable(
-      `Infisical provider ${operation} is not enabled yet (coming soon; runtime resolution and managed writes arrive in a later phase).`,
+      `Infisical is a reference-only provider: ${operation} is not supported. Link an existing Infisical secret by reference instead (Paperclip never writes into Infisical).`,
     );
+  }
+
+  /**
+   * Assemble everything needed for a credential-bearing operation (link/resolve).
+   * Enforces per-company isolation and SEC-1:
+   *  - a per-company vault `providerConfig` is REQUIRED (no global-env fallback
+   *    for projectId/environment, so one company can never resolve against
+   *    another company's — or an ambient — Infisical scope);
+   *  - the origin is the server-pinned `INFISICAL_SITE_URL`;
+   *  - Universal-Auth credentials come from the server env only.
+   */
+  function requireResolutionContext(
+    operation: string,
+    providerConfig: SecretProviderVaultRuntimeConfig | null | undefined,
+  ): { config: InfisicalResolvedConfig; credentials: InfisicalCredentials; gateway: InfisicalGateway } {
+    if (!providerConfig) {
+      throw new SecretProviderClientError({
+        code: "invalid_request",
+        provider: INFISICAL_PROVIDER_ID,
+        operation,
+        message: "An Infisical provider vault (project + environment) must be selected for this company.",
+        rawMessage: "Infisical resolution requires a per-company provider vault config",
+      });
+    }
+    const config = readProviderVaultConfig(providerConfig);
+    const missing: string[] = [];
+    if (!config.siteUrl) missing.push("INFISICAL_SITE_URL");
+    if (!config.projectId) missing.push("projectId");
+    if (!config.environment) missing.push("environment");
+    if (missing.length > 0) {
+      throw new SecretProviderClientError({
+        code: "invalid_request",
+        provider: INFISICAL_PROVIDER_ID,
+        operation,
+        message: `Infisical vault is missing required configuration: ${missing.join(", ")}.`,
+        rawMessage: `Infisical resolution missing: ${missing.join(", ")}`,
+      });
+    }
+    const credentials = resolveCredentials();
+    if (!credentials) {
+      throw new SecretProviderClientError({
+        code: "access_denied",
+        provider: INFISICAL_PROVIDER_ID,
+        operation,
+        message: "Infisical Universal-Auth credentials are not configured on the server.",
+        rawMessage: "INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET missing from server environment",
+      });
+    }
+    return { config, credentials, gateway: resolveGateway() };
   }
 
   async function validateConfig(input?: {
@@ -324,6 +593,11 @@ export function createInfisicalProvider(options?: {
     if (!resolveCredentials()) {
       warnings.push(
         "Infisical Universal-Auth credentials are not present in the server environment (INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET).",
+      );
+    }
+    if (input?.providerConfig && vaultSiteUrlOverrideIgnored(input.providerConfig)) {
+      warnings.push(
+        "The vault siteUrl is ignored: the Infisical origin is pinned server-side to INFISICAL_SITE_URL (SEC-1). Remove the per-company siteUrl to clear this warning.",
       );
     }
     return { ok: true, warnings };
@@ -467,21 +741,74 @@ export function createInfisicalProvider(options?: {
       };
     },
     validateConfig,
-    // ---- Phase 2 (stubbed; unreachable while gated `coming_soon`) ----
+    // ---- Managed writes are unsupported: Paperclip never writes into Infisical ----
     async createSecret(): Promise<PreparedSecretVersion> {
-      return comingSoon("managed secret create");
+      return managedUnsupported("managed secret create");
     },
     async createVersion(): Promise<PreparedSecretVersion> {
-      return comingSoon("managed secret version create");
+      return managedUnsupported("managed secret version create");
     },
-    async linkExternalSecret(): Promise<PreparedSecretVersion> {
-      return comingSoon("external secret link");
+    // ---- Phase 1b live: reference link + runtime resolution ----
+    async linkExternalSecret(input): Promise<PreparedSecretVersion> {
+      const { config, credentials, gateway } = requireResolutionContext(
+        "linkExternalSecret",
+        input.providerConfig,
+      );
+      const ref = parseInfisicalRef(input.externalRef, config.secretPath);
+      try {
+        const session = await gateway.login({
+          siteUrl: config.siteUrl as string,
+          clientId: credentials.clientId,
+          clientSecret: credentials.clientSecret,
+        });
+        // Validate the referenced secret exists at link time. We discard the
+        // value — only the reference coordinates are persisted.
+        await gateway.readSecret({
+          siteUrl: config.siteUrl as string,
+          accessToken: session.accessToken,
+          projectId: config.projectId as string,
+          environment: config.environment as string,
+          secretPath: ref.secretPath,
+          secretKey: ref.secretKey,
+        });
+      } catch (error) {
+        normalizeInfisicalError("linkExternalSecret", error);
+      }
+      return buildExternalReferenceMaterial(config, ref);
     },
-    async resolveVersion(): Promise<string> {
-      return comingSoon("runtime resolution");
+    async resolveVersion(input): Promise<string> {
+      const { config, credentials, gateway } = requireResolutionContext(
+        "resolveVersion",
+        input.providerConfig,
+      );
+      // Prefer the stored material coordinates; fall back to the external ref.
+      const stored = asInfisicalMaterial(input.material);
+      const ref =
+        stored.secretKey
+          ? { secretPath: normalizeSecretPath(stored.secretPath), secretKey: stored.secretKey }
+          : parseInfisicalRef(input.externalRef, config.secretPath);
+      try {
+        const session = await gateway.login({
+          siteUrl: config.siteUrl as string,
+          clientId: credentials.clientId,
+          clientSecret: credentials.clientSecret,
+        });
+        return await gateway.readSecret({
+          siteUrl: config.siteUrl as string,
+          accessToken: session.accessToken,
+          projectId: config.projectId as string,
+          environment: config.environment as string,
+          secretPath: ref.secretPath,
+          secretKey: ref.secretKey,
+        });
+      } catch (error) {
+        normalizeInfisicalError("resolveVersion", error);
+      }
     },
     async deleteOrArchive(): Promise<void> {
-      comingSoon("delete/archive");
+      // External references are not owned by Paperclip; unlinking removes only
+      // the Paperclip-side reference. Nothing is deleted or archived in Infisical.
+      return;
     },
     healthCheck,
   };
