@@ -46,8 +46,15 @@ const INFISICAL_PROVIDER_ID = "infisical" as const;
 const INFISICAL_REF_SCHEME = "infisical" as const;
 const INFISICAL_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_SECRET_PATH = "/";
-const INFISICAL_SECRET_KEY_RE = /^[A-Za-z0-9_.-]+$/;
-const INFISICAL_SECRET_PATH_RE = /^\/(?:[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*)?$/;
+// SEC-4 (KON-2810): the negative lookaheads reject bare `.` and `..` path
+// segments (e.g. `secretPath=/paperclip/../otherco`). Not exploitable in the
+// current single-project, ownership-asserted deployment, but this forecloses a
+// `..` traversal boundary bypass should a future multi-company model ever
+// separate tenants by `secretPath` prefix within a shared project. Kept in sync
+// with `infisicalSecretPathSchema` in packages/shared/src/validators/secret.ts.
+const INFISICAL_SECRET_KEY_RE = /^(?!\.\.?$)[A-Za-z0-9_.-]+$/;
+const INFISICAL_SECRET_PATH_RE =
+  /^\/(?:(?!\.\.?(?:\/|$))[A-Za-z0-9._-]+(?:\/(?!\.\.?(?:\/|$))[A-Za-z0-9._-]+)*)?$/;
 const INFISICAL_RUNTIME_CREDENTIAL_WARNING =
   "Infisical Universal-Auth machine identity credentials (INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET) must be provided to the Paperclip server runtime through the process environment; they are never stored in company_secrets or provider vault config.";
 
@@ -138,9 +145,58 @@ function sha256Hex(value: string): string {
  * `INFISICAL_SITE_URL`. Per-company vault config never contributes the origin
  * used for authenticated requests, so a hostile per-company `siteUrl` cannot be
  * used to exfiltrate the global machine-identity credentials via SSRF.
+ *
+ * SEC-9 / SEC-4 (KON-2810, KON-2697) — DEPLOY-TIME INVARIANT: `INFISICAL_SITE_URL`
+ * MUST remain LAN-only (e.g. `http://192.168.1.137:8081`) and MUST NEVER be
+ * Cloudflare-exposed or otherwise internet-reachable. The GLOBAL Universal-Auth
+ * machine-identity credentials transit this origin on every login, so a
+ * plaintext-HTTP origin resolving to a public host would expose them in transit.
+ * Plaintext HTTP is accepted ONLY because the origin is a trusted LAN host; a
+ * public/internet origin over HTTP is flagged by `siteUrlTransportWarning()` and
+ * surfaced as a validation warning at deploy time.
  */
 function pinnedSiteUrl(): string | null {
   return normalizeSiteUrl(asOptionalNonEmptyString(process.env.INFISICAL_SITE_URL));
+}
+
+/**
+ * SEC-9 (KON-2810): returns a deploy-time warning when the pinned Infisical
+ * origin is plaintext HTTP to a host that is not obviously LAN-local (RFC-1918 /
+ * loopback / `.lan`/`.local`/`.internal`). HTTPS origins and private-range hosts
+ * are considered safe. Warn-only — never throws — so it cannot break resolution.
+ */
+function siteUrlTransportWarning(origin: string | null): string | null {
+  if (!origin) return null;
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return null;
+  }
+  if (url.protocol === "https:") return null;
+  const host = url.hostname;
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return null;
+  const ipv4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (ipv4) {
+    const o1 = Number(ipv4[1]);
+    const o2 = Number(ipv4[2]);
+    const isPrivate =
+      o1 === 10 ||
+      (o1 === 172 && o2 >= 16 && o2 <= 31) ||
+      (o1 === 192 && o2 === 168);
+    if (isPrivate) return null;
+  } else if (
+    host.endsWith(".lan") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal")
+  ) {
+    return null;
+  }
+  return (
+    "INFISICAL_SITE_URL is a plaintext-HTTP origin that does not resolve to a LAN-local host. " +
+    "The Infisical origin MUST remain LAN-only and never internet/Cloudflare-exposed — global " +
+    "Universal-Auth credentials transit it in plaintext (SEC-9, KON-2810). Use a LAN origin or HTTPS."
+  );
 }
 
 function normalizeSecretPath(value: string | null | undefined): string {
@@ -589,6 +645,9 @@ export function createInfisicalProvider(options?: {
       warnings.push(
         "Infisical site URL is not configured (set the vault siteUrl or INFISICAL_SITE_URL).",
       );
+    } else {
+      const transportWarning = siteUrlTransportWarning(pinnedSiteUrl());
+      if (transportWarning) warnings.push(transportWarning);
     }
     if (!resolveCredentials()) {
       warnings.push(
