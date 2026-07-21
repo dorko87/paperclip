@@ -70,6 +70,10 @@ const REDACTED_SENTINEL = "***REDACTED***";
 const COMING_SOON_SECRET_PROVIDERS: ReadonlySet<SecretProvider> = new Set([
   "gcp_secret_manager",
   "vault",
+  // Defense-in-depth (KON-3149 / CTO ruling KON-3148): keep infisical dormant on the
+  // production control plane until Phase-2c credential wiring is board-approved (KON-2842).
+  // Phase-2c enablement = remove "infisical" from this set (and the UI set in Secrets.tsx).
+  "infisical",
 ]);
 const FALLBACK_ADAPTER_SCHEMA_SECRET_FIELDS: Readonly<Record<string, readonly string[]>> = {
   hermes_gateway: ["apiKey"],

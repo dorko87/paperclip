@@ -199,7 +199,12 @@ const PROVIDER_ORDER: SecretProvider[] = [
 ];
 
 export function defaultProviderVaultStatus(provider: SecretProvider): SecretProviderConfigStatus {
-  return provider === "gcp_secret_manager" || provider === "vault"
+  // Defense-in-depth (KON-3149 / CTO ruling KON-3148): infisical stays coming_soon until
+  // Phase-2c enablement (KON-2842). Enablement = drop "infisical" here and in the server set
+  // (COMING_SOON_SECRET_PROVIDERS in server/src/services/secrets.ts).
+  return provider === "gcp_secret_manager" ||
+    provider === "vault" ||
+    provider === "infisical"
     ? "coming_soon"
     : "ready";
 }
