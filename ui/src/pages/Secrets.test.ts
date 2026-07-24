@@ -197,12 +197,14 @@ describe("Secrets page provider helpers", () => {
     ).toBe("prod");
   });
 
-  it("defaults infisical vaults to ready (provider is implemented), keeping gcp/vault coming soon", () => {
-    // Regression: infisical was hardcoded to coming_soon in the UI, which forced newly
-    // created infisical vaults to save as draft metadata only and greyed out the form,
-    // even though the backend implements the provider. Must match the backend
-    // COMING_SOON_SECRET_PROVIDERS set (gcp_secret_manager, vault). See KON-2807.
-    expect(defaultProviderVaultStatus("infisical")).toBe("ready");
+  it("defaults infisical/gcp/vault vaults to coming_soon, keeping local/aws ready", () => {
+    // Defense-in-depth (KON-3149 / CTO ruling KON-3148): infisical is gated back to
+    // coming_soon until Phase-2c credential wiring is board-approved (KON-2842), so no
+    // legitimate resolution is possible on the production control plane today. This must
+    // match the backend COMING_SOON_SECRET_PROVIDERS set (gcp_secret_manager, vault,
+    // infisical). Phase-2c enablement = drop "infisical" here and in the server set.
+    // (Supersedes the KON-2807 regression that briefly defaulted infisical to ready.)
+    expect(defaultProviderVaultStatus("infisical")).toBe("coming_soon");
     expect(defaultProviderVaultStatus("local_encrypted")).toBe("ready");
     expect(defaultProviderVaultStatus("aws_secrets_manager")).toBe("ready");
     expect(defaultProviderVaultStatus("gcp_secret_manager")).toBe("coming_soon");
